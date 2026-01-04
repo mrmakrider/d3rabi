@@ -1,0 +1,104 @@
+name: Build
+
+on:
+  push:
+    branches: [ main ]
+  pull_request:
+    branches: [ main ]
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    
+    steps:
+    - uses: actions/checkout@v4
+    
+    - name: Set up JDK 17
+      uses: actions/setup-java@v4
+      with:
+        java-version: '17'
+        distribution: 'temurin'
+    
+    - name: Setup Gradle
+      uses: gradle/actions/setup-gradle@v4
+    
+    - name: Fix gradlew permissions and line endings
+      run: |
+        git update-index --chmod=+x gradlew
+        sed -i 's/\r$//' gradlew
+        chmod +x gradlew
+    
+    - name: Build All Plugins
+      run: ./gradlew make --no-daemon
+    
+    - name: Upload plugin artifacts
+      uses: actions/upload-artifact@v4
+      with:
+        name: plugins
+        path: |
+          **/build/*.cs3
+          **/build/*.zip
+        if-no-files-found: warn
+
+    - name: Prepare builds branch
+      if: github.event_name != 'pull_request'
+      run: |
+        mkdir -p builds_output
+        find . -name "*.cs3" -path "*/build/*" -exec cp {} builds_output/ \;
+        
+        # Create repo.json for CloudStream
+        cat > builds_output/repo.json << 'EOF'
+        {
+          "name": "d3rabi Plugins",
+          "description": "Arabic CloudStream plugins - Prestige, CimaLight, and more",
+          "manifestVersion": 1,
+          "pluginLists": [
+            "https://raw.githubusercontent.com/${{ github.repository }}/builds/plugins.json"
+          ]
+        }
+        EOF
+        
+        # Create plugins.json listing all plugins
+        echo '[' > builds_output/plugins.json
+        first=true
+        for cs3file in builds_output/*.cs3; do
+          if [ -f "$cs3file" ]; then
+            filename=$(basename "$cs3file" .cs3)
+            if [ "$first" = true ]; then
+              first=false
+            else
+              echo ',' >> builds_output/plugins.json
+            fi
+            cat >> builds_output/plugins.json << PLUGIN
+          {
+            "iconUrl": "https://www.google.com/s2/favicons?domain=google.com&sz=128",
+            "apiVersion": 1,
+            "repositoryUrl": "https://github.com/${{ github.repository }}",
+            "fileSize": $(stat -c%s "$cs3file"),
+            "status": 1,
+            "language": "ar",
+            "authors": ["mrmakrider"],
+            "tvTypes": ["Movie", "TvSeries"],
+            "version": 1,
+            "internalName": "${filename}Plugin",
+            "url": "https://raw.githubusercontent.com/${{ github.repository }}/builds/${filename}.cs3",
+            "name": "$filename"
+          }
+        PLUGIN
+          fi
+        done
+        echo ']' >> builds_output/plugins.json
+
+    - name: Deploy to builds branch
+      if: github.event_name != 'pull_request'
+      run: |
+        cd builds_output
+        git init
+        git config user.name "GitHub Actions"
+        git config user.email "actions@github.com"
+        git add -A
+        git commit -m "Update builds - $(date +'%Y-%m-%d %H:%M:%S')"
+        git push --force "https://x-access-token:${{ secrets.GITHUB_TOKEN }}@github.com/${{ github.repository }}.git" HEAD:builds
