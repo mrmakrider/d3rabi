@@ -207,7 +207,80 @@ class Eishq : MainAPI() {
         val processedUrls = mutableSetOf<String>()
         var hasLinks = false
 
-        // 1. Check for iframes
+        // 1. Extract Base64 encoded video URL from hidden form input "watch"
+        document.select("input[name=watch]").forEach { input ->
+            val base64Value = input.attr("value")
+            if (base64Value.isNotBlank()) {
+                try {
+                    val decoded = String(android.util.Base64.decode(base64Value, android.util.Base64.DEFAULT))
+                    Log.d(name, "Decoded watch input: $decoded")
+                    
+                    // Parse JSON to extract "v" field containing video URL
+                    val videoUrlMatch = Regex(""""v"\s*:\s*"([^"]+)"""").find(decoded)
+                    videoUrlMatch?.groupValues?.get(1)?.let { videoUrl ->
+                        val cleanUrl = videoUrl.replace("\\/", "/")
+                        if (cleanUrl.isNotBlank() && processedUrls.add(cleanUrl)) {
+                            Log.d(name, "Found video URL from watch input: $cleanUrl")
+                            if (loadExtractor(cleanUrl, data, subtitleCallback, callback)) {
+                                hasLinks = true
+                            } else {
+                                // Try to manually extract from the embed page
+                                try {
+                                    val embedResponse = app.get(cleanUrl, referer = data).text
+                                    findVideoUrl(embedResponse)?.let { directUrl ->
+                                        if (processedUrls.add(directUrl)) {
+                                            val isM3u8 = directUrl.contains(".m3u8")
+                                            callback(
+                                                newExtractorLink(
+                                                    source = name,
+                                                    name = "$name - Primary",
+                                                    url = directUrl,
+                                                    type = if (isM3u8) ExtractorLinkType.M3U8 else ExtractorLinkType.VIDEO
+                                                ) {
+                                                    this.referer = cleanUrl
+                                                    this.quality = Qualities.Unknown.value
+                                                }
+                                            )
+                                            hasLinks = true
+                                        }
+                                    }
+                                } catch (e: Exception) {
+                                    Log.e(name, "Error extracting from embed: $cleanUrl", e)
+                                }
+                            }
+                        }
+                    }
+                } catch (e: Exception) {
+                    Log.e(name, "Error decoding Base64 watch input", e)
+                }
+            }
+        }
+
+        // 2. Check downloads page for additional server links
+        try {
+            val downloadsUrl = if (data.contains("?")) {
+                data.substringBefore("?") + "?do=downloads"
+            } else {
+                data.trimEnd('/') + "/?do=downloads"
+            }
+            
+            val downloadsDoc = app.get(downloadsUrl, referer = data).document
+            
+            // Look for download links in table or list
+            downloadsDoc.select("a[href*='vidsp'], a[href*='dood'], a[href*='embed'], a[href*='stream'], table a[href]").forEach { link ->
+                val href = link.attr("href")
+                if (href.isNotBlank() && !href.contains("eishq.net") && processedUrls.add(href)) {
+                    Log.d(name, "Found download link: $href")
+                    if (loadExtractor(href, data, subtitleCallback, callback)) {
+                        hasLinks = true
+                    }
+                }
+            }
+        } catch (e: Exception) {
+            Log.e(name, "Error fetching downloads page", e)
+        }
+
+        // 3. Check for iframes on the main page
         document.select("iframe[src]").forEach { iframe ->
             var src = iframe.attr("src")
             if (src.startsWith("//")) src = "https:$src"
@@ -216,7 +289,6 @@ class Eishq : MainAPI() {
                 if (loadExtractor(src, data, subtitleCallback, callback)) {
                     hasLinks = true
                 } else {
-                    // Try to extract video from iframe page
                     try {
                         val iframeDoc = app.get(src, referer = data).text
                         findVideoUrl(iframeDoc)?.let { videoUrl ->
@@ -243,27 +315,7 @@ class Eishq : MainAPI() {
             }
         }
 
-        // 2. Check video/source tags
-        document.select("video source[src], video[src]").forEach { video ->
-            val src = video.attr("src")
-            if (src.isNotBlank() && processedUrls.add(src)) {
-                val isM3u8 = src.contains(".m3u8")
-                callback(
-                    newExtractorLink(
-                        source = name,
-                        name = "$name - Direct",
-                        url = fixUrl(src),
-                        type = if (isM3u8) ExtractorLinkType.M3U8 else ExtractorLinkType.VIDEO
-                    ) {
-                        this.referer = data
-                        this.quality = Qualities.Unknown.value
-                    }
-                )
-                hasLinks = true
-            }
-        }
-
-        // 3. Check scripts for video URLs
+        // 4. Check scripts for video URLs
         document.select("script").forEach { script ->
             val scriptText = script.html()
             findVideoUrl(scriptText)?.let { videoUrl ->
@@ -280,23 +332,6 @@ class Eishq : MainAPI() {
                             this.quality = Qualities.Unknown.value
                         }
                     )
-                    hasLinks = true
-                }
-            }
-        }
-
-        // 4. Check for server buttons/tabs with data attributes
-        document.select("[data-src], [data-embed], [data-url], [data-video]").forEach { btn ->
-            val embedUrl = btn.attr("data-src").ifBlank {
-                btn.attr("data-embed").ifBlank {
-                    btn.attr("data-url").ifBlank {
-                        btn.attr("data-video")
-                    }
-                }
-            }
-            if (embedUrl.isNotBlank() && processedUrls.add(embedUrl)) {
-                val fullUrl = if (embedUrl.startsWith("//")) "https:$embedUrl" else embedUrl
-                if (loadExtractor(fullUrl, data, subtitleCallback, callback)) {
                     hasLinks = true
                 }
             }
