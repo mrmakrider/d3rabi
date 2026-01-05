@@ -124,68 +124,40 @@ class Shahid : MainAPI() {
 
         val description = document.selectFirst("meta[property=og:description]")?.attr("content")
 
-        // Find episodes
+        // Find episodes - look for links with pattern Xحلقة (like 1حلقة, 2حلقة)
         val episodes = mutableListOf<Episode>()
         
-        // Check if this is a series page (view-serie.php) or video page (watch.php)
-        if (url.contains("view-serie.php")) {
-            // Series page - extract all episode links
+        // Pattern: Xحلقة where X is a number (e.g., "1حلقة", "46حلقة")
+        document.select("a[href*='watch.php']").forEach { epLink ->
+            val epHref = fixUrl(epLink.attr("href"))
+            val epText = epLink.text().trim()
+            
+            // Match "Xحلقة" pattern (number followed by حلقة)
+            val epNumMatch = Regex("""(\d+)\s*حلقة""").find(epText)
+            if (epNumMatch != null) {
+                val epNum = epNumMatch.groupValues[1].toIntOrNull()
+                if (epNum != null) {
+                    episodes.add(newEpisode(epHref) {
+                        name = "الحلقة $epNum"
+                        episode = epNum
+                    })
+                }
+            }
+        }
+        
+        // If no episodes found with the short pattern, try other patterns
+        if (episodes.isEmpty()) {
             document.select("a[href*='watch.php']").forEach { epLink ->
                 val epHref = fixUrl(epLink.attr("href"))
-                val epTitle = epLink.text().trim()
+                val epText = epLink.text().trim()
                 
-                // Extract episode number from title
-                val epNum = Regex("""الحلقة\s*(\d+)|حلقة\s*(\d+)|(\d+)\s*حلقة""").find(epTitle)?.let { match ->
-                    match.groupValues.drop(1).firstOrNull { it.isNotBlank() }?.toIntOrNull()
-                }
-                
-                episodes.add(newEpisode(epHref) {
-                    name = epTitle
-                    episode = epNum
-                })
-            }
-        } else if (url.contains("watch.php")) {
-            // Video page - look for episode list links (like 46حلقة, 47حلقة)
-            // Also check for view-serie.php link to get all episodes
-            val seriesLink = document.selectFirst("a[href*='view-serie.php']")?.attr("href")
-            
-            if (seriesLink != null) {
-                // Fetch the series page for complete episode list
-                try {
-                    val seriesDoc = app.get(fixUrl(seriesLink)).document
-                    seriesDoc.select("a[href*='watch.php']").forEach { epLink ->
-                        val epHref = fixUrl(epLink.attr("href"))
-                        val epTitle = epLink.text().trim()
-                        
-                        val epNum = Regex("""الحلقة\s*(\d+)|حلقة\s*(\d+)|(\d+)\s*حلقة""").find(epTitle)?.let { match ->
-                            match.groupValues.drop(1).firstOrNull { it.isNotBlank() }?.toIntOrNull()
-                        }
-                        
+                // Match "الحلقة X" pattern 
+                val epNumMatch = Regex("""الحلقة\s*(\d+)""").find(epText)
+                if (epNumMatch != null) {
+                    val epNum = epNumMatch.groupValues[1].toIntOrNull()
+                    if (epNum != null && epHref != url) {
                         episodes.add(newEpisode(epHref) {
-                            name = epTitle
-                            episode = epNum
-                        })
-                    }
-                } catch (e: Exception) {
-                    Log.e(name, "Error fetching series page: $seriesLink", e)
-                }
-            }
-            
-            // Also look for inline episode links on the current page (fall back)
-            if (episodes.isEmpty()) {
-                document.select("a[href*='watch.php']").forEach { epLink ->
-                    val epHref = fixUrl(epLink.attr("href"))
-                    if (epHref == url) return@forEach // Skip current page
-                    
-                    val epTitle = epLink.text().trim()
-                    // Match patterns like "46حلقة" or "الحلقة 46"
-                    val epNum = Regex("""(\d+)\s*حلقة|الحلقة\s*(\d+)""").find(epTitle)?.let { match ->
-                        match.groupValues.drop(1).firstOrNull { it.isNotBlank() }?.toIntOrNull()
-                    }
-                    
-                    if (epNum != null || epTitle.contains("حلقة") || epTitle.contains("الحلقة")) {
-                        episodes.add(newEpisode(epHref) {
-                            name = epTitle.ifBlank { "الحلقة $epNum" }
+                            name = "الحلقة $epNum"
                             episode = epNum
                         })
                     }
@@ -193,11 +165,8 @@ class Shahid : MainAPI() {
             }
         }
 
-        // Sort episodes by number
-        episodes.sortBy { it.episode }
-        
-        // Remove duplicates by URL
-        val uniqueEpisodes = episodes.distinctBy { it.data }
+        // Sort episodes by number and remove duplicates
+        val uniqueEpisodes = episodes.distinctBy { it.data }.sortedBy { it.episode }
 
         return if (uniqueEpisodes.isNotEmpty()) {
             newTvSeriesLoadResponse(title, url, TvType.TvSeries, uniqueEpisodes) {
@@ -213,23 +182,16 @@ class Shahid : MainAPI() {
         }
     }
 
-    private fun findVideoUrl(text: String): String? {
-        val patterns = listOf(
-            Regex("""(?:file|src|source)\s*[:=]\s*['"]([^'"]+\.(?:m3u8|mp4)[^'"]*)['"]"""),
-            Regex("""['"]([^'"]+\.(?:m3u8|mp4)[^'"]*)['"]"""),
-            Regex("""(https?://[^\s'"]+\.(?:m3u8|mp4)[^\s'"]*)""")
-        )
-        
-        for (pattern in patterns) {
-            val match = pattern.find(text)
-            if (match != null) {
-                val url = match.groupValues[1]
-                if (url.isNotBlank() && (url.contains(".m3u8") || url.contains(".mp4"))) {
-                    return url
-                }
-            }
+    private fun extractServersFromScript(script: String): List<String> {
+        // Extract servers array from script: let servers = [...]
+        val serversMatch = Regex("""let\s+servers\s*=\s*\[(.*?)\];""", RegexOption.DOT_MATCHES_ALL).find(script)
+        if (serversMatch != null) {
+            val serversContent = serversMatch.groupValues[1]
+            // Extract URLs from the JSON-like array
+            val urlPattern = Regex(""""url"\s*:\s*"([^"]+)"""")
+            return urlPattern.findAll(serversContent).map { it.groupValues[1].replace("\\/", "/") }.toList()
         }
-        return null
+        return emptyList()
     }
 
     override suspend fun loadLinks(
@@ -240,113 +202,67 @@ class Shahid : MainAPI() {
     ): Boolean {
         Log.i(name, "loadLinks for: $data")
         
-        val document = try {
-            app.get(data, referer = mainUrl).document
-        } catch (e: Exception) {
-            Log.e(name, "Error loading page: $data", e)
-            return false
-        }
-
         val processedUrls = mutableSetOf<String>()
         var hasLinks = false
 
-        // 1. Check for iframes on the page
-        document.select("iframe[src]").forEach { iframe ->
-            var src = iframe.attr("src")
-            if (src.startsWith("//")) src = "https:$src"
-            if (src.isNotBlank() && !src.contains("google") && !src.contains("facebook") && processedUrls.add(src)) {
-                Log.d(name, "Found iframe: $src")
-                if (loadExtractor(src, data, subtitleCallback, callback)) {
-                    hasLinks = true
-                } else {
-                    // Try to extract directly from iframe content
-                    try {
-                        val iframeDoc = app.get(src, referer = data).text
-                        findVideoUrl(iframeDoc)?.let { videoUrl ->
-                            if (processedUrls.add(videoUrl)) {
-                                val isM3u8 = videoUrl.contains(".m3u8")
-                                callback(
-                                    newExtractorLink(
-                                        source = name,
-                                        name = "$name - iframe",
-                                        url = videoUrl,
-                                        type = if (isM3u8) ExtractorLinkType.M3U8 else ExtractorLinkType.VIDEO
-                                    ) {
-                                        this.referer = src
-                                        this.quality = Qualities.Unknown.value
-                                    }
-                                )
-                                hasLinks = true
-                            }
-                        }
-                    } catch (e: Exception) {
-                        Log.e(name, "Error extracting from iframe: $src", e)
-                    }
-                }
-            }
-        }
-
-        // 2. Check for player.php URL pattern
+        // Extract video ID from URL
         val vid = Regex("""vid=([a-zA-Z0-9]+)""").find(data)?.groupValues?.get(1)
+        
         if (vid != null) {
-            val playerUrl = "$mainUrl/player.php?vid=$vid"
-            if (processedUrls.add(playerUrl)) {
-                try {
-                    val playerDoc = app.get(playerUrl, referer = data).text
-                    findVideoUrl(playerDoc)?.let { videoUrl ->
-                        if (processedUrls.add(videoUrl)) {
-                            val isM3u8 = videoUrl.contains(".m3u8")
-                            callback(
-                                newExtractorLink(
-                                    source = name,
-                                    name = "$name - Player",
-                                    url = videoUrl,
-                                    type = if (isM3u8) ExtractorLinkType.M3U8 else ExtractorLinkType.VIDEO
-                                ) {
-                                    this.referer = playerUrl
-                                    this.quality = Qualities.Unknown.value
-                                }
-                            )
+            // Fetch embed.php page which contains the servers array
+            val embedUrl = "$mainUrl/embed.php?vid=$vid"
+            try {
+                val embedResponse = app.get(embedUrl, referer = data).text
+                Log.d(name, "Fetching embed page: $embedUrl")
+                
+                // Extract servers from the script
+                val serverUrls = extractServersFromScript(embedResponse)
+                Log.d(name, "Found ${serverUrls.size} servers")
+                
+                serverUrls.forEach { serverUrl ->
+                    if (serverUrl.isNotBlank() && processedUrls.add(serverUrl)) {
+                        Log.d(name, "Processing server: $serverUrl")
+                        
+                        // Try to use built-in extractors first
+                        if (loadExtractor(serverUrl, embedUrl, subtitleCallback, callback)) {
                             hasLinks = true
                         }
                     }
-                    
-                    // Also check for iframes in player page
-                    val playerDocument = app.get(playerUrl, referer = data).document
-                    playerDocument.select("iframe[src]").forEach { iframe ->
-                        var src = iframe.attr("src")
-                        if (src.startsWith("//")) src = "https:$src"
-                        if (src.isNotBlank() && processedUrls.add(src)) {
-                            if (loadExtractor(src, data, subtitleCallback, callback)) {
-                                hasLinks = true
-                            }
+                }
+                
+                // Also check for iframes directly in embed page
+                val embedDoc = app.get(embedUrl, referer = data).document
+                embedDoc.select("iframe[src]").forEach { iframe ->
+                    var src = iframe.attr("src")
+                    if (src.startsWith("//")) src = "https:$src"
+                    if (src.isNotBlank() && !src.contains("google.com/recaptcha") && processedUrls.add(src)) {
+                        Log.d(name, "Found iframe in embed: $src")
+                        if (loadExtractor(src, embedUrl, subtitleCallback, callback)) {
+                            hasLinks = true
                         }
                     }
-                } catch (e: Exception) {
-                    Log.e(name, "Error fetching player page: $playerUrl", e)
                 }
+            } catch (e: Exception) {
+                Log.e(name, "Error fetching embed page: $embedUrl", e)
             }
         }
 
-        // 3. Check scripts for video URLs
-        document.select("script").forEach { script ->
-            val scriptText = script.html()
-            findVideoUrl(scriptText)?.let { videoUrl ->
-                if (processedUrls.add(videoUrl)) {
-                    val isM3u8 = videoUrl.contains(".m3u8")
-                    callback(
-                        newExtractorLink(
-                            source = name,
-                            name = "$name - Script",
-                            url = videoUrl,
-                            type = if (isM3u8) ExtractorLinkType.M3U8 else ExtractorLinkType.VIDEO
-                        ) {
-                            this.referer = data
-                            this.quality = Qualities.Unknown.value
+        // Fallback: Check for iframes on the main watch page
+        if (!hasLinks) {
+            try {
+                val document = app.get(data, referer = mainUrl).document
+                document.select("iframe[src]").forEach { iframe ->
+                    var src = iframe.attr("src")
+                    if (src.startsWith("//")) src = "https:$src"
+                    if (src.isNotBlank() && !src.contains("google") && !src.contains("facebook") && processedUrls.add(src)) {
+                        Log.d(name, "Found iframe on watch page: $src")
+                        if (loadExtractor(src, data, subtitleCallback, callback)) {
+                            hasLinks = true
                         }
-                    )
-                    hasLinks = true
+                    }
                 }
+            } catch (e: Exception) {
+                Log.e(name, "Error checking main page iframes", e)
             }
         }
 
