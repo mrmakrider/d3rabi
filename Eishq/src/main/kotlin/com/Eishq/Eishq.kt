@@ -29,19 +29,21 @@ class Eishq : MainAPI() {
 
         // Try multiple ways to get the poster image
         val posterUrl = run {
-            // First try background-image from .imgSer div (main method for this site)
-            val bgStyle = selectFirst(".imgSer, .poster div[style*='background']")?.attr("style")
+            // Try background-image from .imgSer div (series) or .imgBg div (movies)
+            val bgStyle = selectFirst(".imgSer, .imgBg, .poster div[style*='background'], div[style*='background-image']")?.attr("style")
             if (bgStyle != null) {
                 val bgUrl = Regex("""url\s*\(\s*['"]?([^'")\s]+)['"]?\s*\)""").find(bgStyle)?.groupValues?.get(1)
                 if (!bgUrl.isNullOrBlank()) return@run fixUrlNull(bgUrl)
             }
             
-            // Fallback to img tag with various lazy-load attributes
+            // Try img tag with various attributes (for episodes/latest)
             selectFirst("img")?.let { img ->
-                img.attr("data-src").ifBlank {
-                    img.attr("data-lazy-src").ifBlank {
-                        img.attr("data-original").ifBlank {
-                            img.attr("src")
+                img.attr("data-img").ifBlank {
+                    img.attr("data-src").ifBlank {
+                        img.attr("data-lazy-src").ifBlank {
+                            img.attr("data-original").ifBlank {
+                                img.attr("src")
+                            }
                         }
                     }
                 }
@@ -116,16 +118,16 @@ class Eishq : MainAPI() {
                 if (it.isNotBlank()) return@run it 
             }
             
-            // Try background-image from .imgSer div
-            val bgStyle = document.selectFirst(".imgSer, .poster div[style*='background']")?.attr("style")
+            // Try background-image from .imgSer div (series) or .imgBg div (movies)
+            val bgStyle = document.selectFirst(".imgSer, .imgBg, .poster div[style*='background'], div[style*='background-image']")?.attr("style")
             if (bgStyle != null) {
                 val bgUrl = Regex("""url\s*\(\s*['"]?([^'")\s]+)['"]?\s*\)""").find(bgStyle)?.groupValues?.get(1)
                 if (!bgUrl.isNullOrBlank()) return@run fixUrlNull(bgUrl)
             }
             
-            // Fallback to img tags
-            document.selectFirst(".post-thumbnail img, .video-poster img, article img")?.let { img ->
-                fixUrlNull(img.attr("data-src").ifBlank { img.attr("src") })
+            // Fallback to img tags with various attributes
+            document.selectFirst(".post-thumbnail img, .video-poster img, article img, img")?.let { img ->
+                fixUrlNull(img.attr("data-img").ifBlank { img.attr("data-src").ifBlank { img.attr("src") } })
             }
         }
 
