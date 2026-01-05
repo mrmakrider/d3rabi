@@ -27,13 +27,26 @@ class Eishq : MainAPI() {
             it.text().ifBlank { it.attr("alt") }
         }?.trim() ?: linkElement.attr("title").ifBlank { return null }
 
-        val posterUrl = selectFirst("img")?.let { img ->
-            img.attr("data-src").ifBlank {
-                img.attr("data-lazy-src").ifBlank {
-                    img.attr("src")
-                }
+        // Try multiple ways to get the poster image
+        val posterUrl = run {
+            // First try background-image from .imgSer div (main method for this site)
+            val bgStyle = selectFirst(".imgSer, .poster div[style*='background']")?.attr("style")
+            if (bgStyle != null) {
+                val bgUrl = Regex("""url\s*\(\s*['"]?([^'")\s]+)['"]?\s*\)""").find(bgStyle)?.groupValues?.get(1)
+                if (!bgUrl.isNullOrBlank()) return@run fixUrlNull(bgUrl)
             }
-        }?.let { fixUrlNull(it) }
+            
+            // Fallback to img tag with various lazy-load attributes
+            selectFirst("img")?.let { img ->
+                img.attr("data-src").ifBlank {
+                    img.attr("data-lazy-src").ifBlank {
+                        img.attr("data-original").ifBlank {
+                            img.attr("src")
+                        }
+                    }
+                }
+            }?.let { fixUrlNull(it) }
+        }
 
         val isSeries = href.contains("/series/") || !href.contains("/movies/")
 
@@ -62,8 +75,8 @@ class Eishq : MainAPI() {
             return newHomePageResponse(request.name, emptyList())
         }
 
-        // Find content items - the site uses article or div containers with images
-        val items = document.select("article, .post-item, .video-item, div:has(> a[href*='/video/'] img)").mapNotNull { element ->
+        // Find content items - the site uses .block-post containers
+        val items = document.select(".block-post, article, .post-item, .video-item").mapNotNull { element ->
             element.toSearchResult()
         }.distinctBy { it.url }
 
@@ -79,7 +92,7 @@ class Eishq : MainAPI() {
             return emptyList()
         }
 
-        return document.select("article, .post-item, .video-item, div:has(> a[href*='/video/'] img)").mapNotNull { element ->
+        return document.select(".block-post, article, .post-item, .video-item").mapNotNull { element ->
             element.toSearchResult()
         }.distinctBy { it.url }
     }
@@ -96,10 +109,25 @@ class Eishq : MainAPI() {
             ?: document.selectFirst("title")?.text()?.substringBefore(" - ")?.trim()
             ?: "Unknown"
 
-        val poster = document.selectFirst("meta[property=og:image]")?.attr("content")
-            ?: document.selectFirst(".post-thumbnail img, .video-poster img, article img")?.let { img ->
+        // Try multiple ways to get poster
+        val poster = run {
+            // First try og:image meta tag
+            document.selectFirst("meta[property=og:image]")?.attr("content")?.let { 
+                if (it.isNotBlank()) return@run it 
+            }
+            
+            // Try background-image from .imgSer div
+            val bgStyle = document.selectFirst(".imgSer, .poster div[style*='background']")?.attr("style")
+            if (bgStyle != null) {
+                val bgUrl = Regex("""url\s*\(\s*['"]?([^'")\s]+)['"]?\s*\)""").find(bgStyle)?.groupValues?.get(1)
+                if (!bgUrl.isNullOrBlank()) return@run fixUrlNull(bgUrl)
+            }
+            
+            // Fallback to img tags
+            document.selectFirst(".post-thumbnail img, .video-poster img, article img")?.let { img ->
                 fixUrlNull(img.attr("data-src").ifBlank { img.attr("src") })
             }
+        }
 
         val description = document.selectFirst("meta[property=og:description]")?.attr("content")
             ?: document.selectFirst(".description, .plot, .story")?.text()
