@@ -1,0 +1,8 @@
+{
+  "name": "d3rabi Plugins",
+  "description": "Arabic CloudStream plugins - Prestige, CimaLight, and more",
+  "manifestVersion": 1,
+  "pluginLists": [
+    "https://raw.githubusercontent.com/mrmakrider/d3rabi/builds/plugins.json"
+  ]
+}
